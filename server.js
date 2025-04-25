@@ -1,17 +1,44 @@
 const express = require('express');
 const cors = require('cors');
-const { OpenAI } = require('openai');
+const axios = require('axios');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// OpenAI Configuration
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY // Configure via environment variables on Render.com
-});
+// OpenRouter Configuration
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-pro-exp-03-25:free@server';
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase limit for handling large directory structures
+
+// Function to call OpenRouter API
+async function callOpenRouter(messages, temperature = 0.7) {
+  try {
+    const response = await axios.post(
+      OPENROUTER_API_URL,
+      {
+        model: OPENROUTER_MODEL,
+        messages: messages,
+        temperature: temperature,
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://organaizer-api.onrender.com',
+          'X-Title': 'OrganAIzer'
+        }
+      }
+    );
+    
+    return response.data.choices[0].message.content;
+  } catch (error) {
+    console.error('Error calling OpenRouter API:', error.response?.data || error.message);
+    throw new Error('Failed to process AI request');
+  }
+}
 
 // Main endpoint
 app.post('/organize', async (req, res) => {
@@ -119,7 +146,7 @@ async function suggestOrganization(folderData) {
   // Extract statistics and patterns from folder structure
   const stats = analyzeFolder(folderData);
   
-  // Use OpenAI to generate suggestions based on analysis
+  // Use OpenRouter to generate suggestions based on analysis
   const prompt = `
     Analyze this folder structure and suggest the best way to organize it:
     
@@ -135,16 +162,12 @@ async function suggestOrganization(folderData) {
     Respond in Italian.
   `;
   
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4-turbo",
-    messages: [
-      { role: "system", content: "You are an assistant expert in file and folder organization." },
-      { role: "user", content: prompt }
-    ],
-    temperature: 0.7,
-  });
+  const messages = [
+    { role: "system", content: "You are an assistant expert in file and folder organization." },
+    { role: "user", content: prompt }
+  ];
   
-  const suggestions = completion.choices[0].message.content;
+  const suggestions = await callOpenRouter(messages, 0.7);
   
   return {
     action: 'suggest',
@@ -159,7 +182,7 @@ async function suggestOrganization(folderData) {
 async function searchByDescription(folderData, query) {
   const files = extractAllFiles(folderData);
   
-  // Use OpenAI to analyze semantic query and find matching files
+  // Use OpenRouter to analyze semantic query and find matching files
   const fileDescriptions = files.map(file => ({
     path: file.path,
     name: file.name,
@@ -177,17 +200,12 @@ async function searchByDescription(folderData, query) {
     Respond in Italian.
   `;
   
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4-turbo",
-    messages: [
-      { role: "system", content: "You are an assistant expert in file analysis and search." },
-      { role: "user", content: prompt }
-    ],
-    temperature: 0.2,
-  });
+  const messages = [
+    { role: "system", content: "You are an assistant expert in file analysis and search." },
+    { role: "user", content: prompt }
+  ];
   
-  // Process OpenAI's response to extract files and scores
-  const aiResponse = completion.choices[0].message.content;
+  const aiResponse = await callOpenRouter(messages, 0.2);
   const matchedFiles = parseAISearchResponse(aiResponse, files);
   
   return {
@@ -231,21 +249,19 @@ async function determineCategoriesWithAI(filesByExtension) {
     { "categoryName": ["extension1", "extension2", ...], ... }
   `;
   
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4-turbo",
-    messages: [
-      { role: "system", content: "You are an expert in file organization." },
-      { role: "user", content: prompt }
-    ],
-    temperature: 0.2,
-  });
+  const messages = [
+    { role: "system", content: "You are an expert in file organization." },
+    { role: "user", content: prompt }
+  ];
   
   try {
+    const aiResponse = await callOpenRouter(messages, 0.2);
+    
     // Extract JSON from response
-    const jsonMatch = completion.choices[0].message.content.match(/```json([\s\S]*?)```/) || 
-                      completion.choices[0].message.content.match(/\{[\s\S]*\}/);
+    const jsonMatch = aiResponse.match(/```json([\s\S]*?)```/) || 
+                      aiResponse.match(/\{[\s\S]*\}/);
                       
-    const jsonStr = jsonMatch ? jsonMatch[0].replace(/```json|```/g, '') : completion.choices[0].message.content;
+    const jsonStr = jsonMatch ? jsonMatch[0].replace(/```json|```/g, '') : aiResponse;
     return JSON.parse(jsonStr);
   } catch (error) {
     console.error("Error parsing AI response:", error);
@@ -459,7 +475,7 @@ function formatFileSize(bytes) {
 
 // Base endpoint for status check
 app.get('/', (req, res) => {
-  res.json({ status: 'OrganAIzer API is running' });
+  res.json({ status: 'OrganAIzer API is running with OpenRouter' });
 });
 
 // Start server
