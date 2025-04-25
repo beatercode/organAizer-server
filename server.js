@@ -1,0 +1,468 @@
+const express = require('express');
+const cors = require('cors');
+const { OpenAI } = require('openai');
+const app = express();
+const port = process.env.PORT || 3000;
+
+// OpenAI Configuration
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY // Configure via environment variables on Render.com
+});
+
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '50mb' })); // Increase limit for handling large directory structures
+
+// Main endpoint
+app.post('/organize', async (req, res) => {
+  try {
+    const { folderData, option, userInput } = req.body;
+    
+    if (!folderData) {
+      return res.status(400).json({ error: 'Missing folder data' });
+    }
+    
+    let result;
+    
+    switch (option) {
+      case 'categorize':
+        result = await categorizeFolderContent(folderData);
+        break;
+      case 'rename':
+        result = await suggestRenaming(folderData, userInput);
+        break;
+      case 'suggest':
+        result = await suggestOrganization(folderData);
+        break;
+      case 'search':
+        result = await searchByDescription(folderData, userInput);
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid option' });
+    }
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Error processing request:', error);
+    res.status(500).json({ 
+      error: 'Error processing request',
+      details: error.message 
+    });
+  }
+});
+
+// Function to analyze and categorize folder content
+async function categorizeFolderContent(folderData) {
+  // Extract all files (not folders) from the recursive structure
+  const files = extractAllFiles(folderData);
+  
+  // Group files by extension
+  const filesByExtension = {};
+  files.forEach(file => {
+    const ext = file.extension || 'no_extension';
+    if (!filesByExtension[ext]) {
+      filesByExtension[ext] = [];
+    }
+    filesByExtension[ext].push(file);
+  });
+  
+  // Determine more meaningful categories using AI
+  const categories = await determineCategoriesWithAI(filesByExtension);
+  
+  return {
+    action: 'categorize',
+    categories: categories,
+    filesByCategory: mapFilesToCategories(files, categories)
+  };
+}
+
+// Function to suggest file renaming
+async function suggestRenaming(folderData, pattern) {
+  const files = extractAllFiles(folderData);
+  
+  // Analyze pattern provided by user
+  // Supports tokens like {date}, {name}, {type}, {counter}, etc.
+  const renameSuggestions = [];
+  
+  for (const file of files) {
+    let newName = pattern || '{name}_{counter}';
+    
+    // Replace tokens with corresponding values
+    newName = newName
+      .replace('{name}', file.name.replace(/\.[^/.]+$/, "")) // Name without extension
+      .replace('{extension}', file.extension || '')
+      .replace('{date}', new Date(file.stats.mtime).toISOString().split('T')[0])
+      .replace('{size}', formatFileSize(file.stats.size))
+      .replace('{counter}', files.indexOf(file) + 1);
+    
+    // Make sure extension is preserved if not specified in pattern
+    if (!newName.includes(file.extension) && file.extension) {
+      newName += file.extension;
+    }
+    
+    renameSuggestions.push({
+      originalPath: file.path,
+      originalName: file.name,
+      suggestedName: newName
+    });
+  }
+  
+  return {
+    action: 'rename',
+    pattern: pattern,
+    suggestions: renameSuggestions
+  };
+}
+
+// Function to suggest optimal organization
+async function suggestOrganization(folderData) {
+  // Extract statistics and patterns from folder structure
+  const stats = analyzeFolder(folderData);
+  
+  // Use OpenAI to generate suggestions based on analysis
+  const prompt = `
+    Analyze this folder structure and suggest the best way to organize it:
+    
+    Total files: ${stats.totalFiles}
+    File types present: ${stats.fileTypes.join(', ')}
+    Total size: ${formatFileSize(stats.totalSize)}
+    Largest files: ${stats.largestFiles.map(f => f.name).join(', ')}
+    
+    Current structure is:
+    ${JSON.stringify(summarizeFolderStructure(folderData), null, 2)}
+    
+    Provide 3-5 specific suggestions on how to better organize this folder.
+    Respond in Italian.
+  `;
+  
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4-turbo",
+    messages: [
+      { role: "system", content: "You are an assistant expert in file and folder organization." },
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.7,
+  });
+  
+  const suggestions = completion.choices[0].message.content;
+  
+  return {
+    action: 'suggest',
+    folderStats: stats,
+    suggestions: suggestions,
+    // Add a visual representation of suggested structure
+    suggestedStructure: generateSuggestedStructure(folderData, suggestions)
+  };
+}
+
+// Function to search files based on semantic descriptions
+async function searchByDescription(folderData, query) {
+  const files = extractAllFiles(folderData);
+  
+  // Use OpenAI to analyze semantic query and find matching files
+  const fileDescriptions = files.map(file => ({
+    path: file.path,
+    name: file.name,
+    type: file.extension,
+    size: file.stats.size,
+    modified: new Date(file.stats.mtime).toISOString()
+  }));
+  
+  const prompt = `
+    Given these files:
+    ${JSON.stringify(fileDescriptions, null, 2)}
+    
+    Find the ones that best match the following description: "${query}"
+    Provide a relevance score from 0 to 100 for each file that might match.
+    Respond in Italian.
+  `;
+  
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4-turbo",
+    messages: [
+      { role: "system", content: "You are an assistant expert in file analysis and search." },
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.2,
+  });
+  
+  // Process OpenAI's response to extract files and scores
+  const aiResponse = completion.choices[0].message.content;
+  const matchedFiles = parseAISearchResponse(aiResponse, files);
+  
+  return {
+    action: 'search',
+    query: query,
+    matches: matchedFiles
+  };
+}
+
+// Helper functions
+
+function extractAllFiles(folderData, results = []) {
+  if (folderData.type === 'file') {
+    results.push(folderData);
+  } else if (folderData.children && Array.isArray(folderData.children)) {
+    folderData.children.forEach(child => {
+      extractAllFiles(child, results);
+    });
+  }
+  return results;
+}
+
+async function determineCategoriesWithAI(filesByExtension) {
+  // Prepare an input for the AI describing the file types
+  const extensionSummary = Object.entries(filesByExtension).map(([ext, files]) => {
+    return `${ext}: ${files.length} files (examples: ${files.slice(0, 3).map(f => f.name).join(', ')})`;
+  }).join('\n');
+  
+  const prompt = `
+    Given these file types in a folder:
+    
+    ${extensionSummary}
+    
+    Suggest logical categories to organize them, following these rules:
+    1. Group similar extensions (e.g., .jpg, .png under "Images")
+    2. Create 4-7 categories, not more
+    3. Assign each extension to only one category
+    4. Use meaningful category names in Italian
+    
+    Provide the result as JSON with format:
+    { "categoryName": ["extension1", "extension2", ...], ... }
+  `;
+  
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4-turbo",
+    messages: [
+      { role: "system", content: "You are an expert in file organization." },
+      { role: "user", content: prompt }
+    ],
+    temperature: 0.2,
+  });
+  
+  try {
+    // Extract JSON from response
+    const jsonMatch = completion.choices[0].message.content.match(/```json([\s\S]*?)```/) || 
+                      completion.choices[0].message.content.match(/\{[\s\S]*\}/);
+                      
+    const jsonStr = jsonMatch ? jsonMatch[0].replace(/```json|```/g, '') : completion.choices[0].message.content;
+    return JSON.parse(jsonStr);
+  } catch (error) {
+    console.error("Error parsing AI response:", error);
+    // Fallback to simple categories based on common extensions
+    return {
+      "Documenti": [".pdf", ".doc", ".docx", ".txt", ".rtf"],
+      "Immagini": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"],
+      "Video": [".mp4", ".avi", ".mov", ".wmv", ".mkv"],
+      "Audio": [".mp3", ".wav", ".aac", ".flac", ".ogg"],
+      "Archivi": [".zip", ".rar", ".7z", ".tar", ".gz"],
+      "Altri": ["no_extension"]
+    };
+  }
+}
+
+function mapFilesToCategories(files, categories) {
+  const result = {};
+  
+  // Initialize categories
+  Object.keys(categories).forEach(category => {
+    result[category] = [];
+  });
+  
+  // Add an "Altri" (Others) category if it doesn't exist
+  if (!result["Altri"]) {
+    result["Altri"] = [];
+  }
+  
+  // Map each file to its category
+  files.forEach(file => {
+    let assigned = false;
+    const ext = file.extension || 'no_extension';
+    
+    // Find which category the extension belongs to
+    for (const [category, extensions] of Object.entries(categories)) {
+      if (extensions.includes(ext)) {
+        result[category].push(file);
+        assigned = true;
+        break;
+      }
+    }
+    
+    // If not assigned to any category, put it in "Altri" (Others)
+    if (!assigned) {
+      result["Altri"].push(file);
+    }
+  });
+  
+  return result;
+}
+
+function analyzeFolder(folderData) {
+  const files = extractAllFiles(folderData);
+  const fileTypes = [...new Set(files.map(f => f.extension || 'no_extension'))];
+  const totalSize = files.reduce((sum, file) => sum + file.stats.size, 0);
+  
+  // Find largest files
+  const sortedBySize = [...files].sort((a, b) => b.stats.size - a.stats.size);
+  const largestFiles = sortedBySize.slice(0, 5);
+  
+  return {
+    totalFiles: files.length,
+    fileTypes,
+    totalSize,
+    largestFiles: largestFiles.map(f => ({
+      name: f.name,
+      path: f.path,
+      size: f.stats.size
+    })),
+    oldestFile: files.length > 0 ? 
+      files.reduce((oldest, file) => 
+        file.stats.mtime < oldest.stats.mtime ? file : oldest
+      ) : null,
+    newestFile: files.length > 0 ?
+      files.reduce((newest, file) => 
+        file.stats.mtime > newest.stats.mtime ? file : newest
+      ) : null
+  };
+}
+
+function summarizeFolderStructure(folderData, depth = 0, maxDepth = 2) {
+  if (depth > maxDepth) {
+    return `${folderData.name} (e altri elementi...)`;
+  }
+  
+  if (folderData.type === 'file') {
+    return folderData.name;
+  }
+  
+  const result = {
+    name: folderData.name,
+    children: []
+  };
+  
+  if (folderData.children && Array.isArray(folderData.children)) {
+    // Limit to 10 items per level to keep output manageable
+    const limitedChildren = folderData.children.slice(0, 10);
+    result.children = limitedChildren.map(child => 
+      summarizeFolderStructure(child, depth + 1, maxDepth)
+    );
+    
+    if (folderData.children.length > 10) {
+      result.children.push(`... e altri ${folderData.children.length - 10} elementi`);
+    }
+  }
+  
+  return result;
+}
+
+function generateSuggestedStructure(folderData, aiSuggestions) {
+  // Simple visual representation of suggested structure
+  // In a real implementation, this could generate an interactive tree
+  return {
+    currentRoot: folderData.name,
+    suggestedChanges: aiSuggestions.split('\n').filter(line => line.trim()),
+    visualization: "Rappresentazione grafica verrebbe generata qui"
+  };
+}
+
+function parseAISearchResponse(aiResponse, files) {
+  // Attempt to extract files and scores from AI response
+  // This is a simplified approach, might require more sophisticated text analysis
+  const matches = [];
+  
+  // Look for mentions of file names with scores
+  const fileNames = files.map(f => f.name);
+  
+  // Pattern to find file:score matches
+  const scorePattern = /(['"]?)([^'"]+)\1\s*[:|-]\s*(\d+)/g;
+  let match;
+  
+  while ((match = scorePattern.exec(aiResponse)) !== null) {
+    const fileName = match[2].trim();
+    const score = parseInt(match[3]);
+    
+    // Find most likely matching file
+    const bestMatch = findBestFileNameMatch(fileName, files);
+    
+    if (bestMatch) {
+      matches.push({
+        file: bestMatch,
+        relevanceScore: score,
+        reason: "Corrispondenza con la query dell'utente"
+      });
+    }
+  }
+  
+  // If fails to extract in structured format, return full response
+  if (matches.length === 0) {
+    return {
+      rawAIResponse: aiResponse,
+      note: "Non è stato possibile estrarre corrispondenze strutturate"
+    };
+  }
+  
+  return matches.sort((a, b) => b.relevanceScore - a.relevanceScore);
+}
+
+function findBestFileNameMatch(name, files) {
+  // Find file that best matches the given name
+  // Use simple substring matching
+  for (const file of files) {
+    if (file.name.toLowerCase().includes(name.toLowerCase()) || 
+        name.toLowerCase().includes(file.name.toLowerCase())) {
+      return file;
+    }
+  }
+  
+  // If no exact matches, try partial matches
+  let bestMatch = null;
+  let bestScore = 0;
+  
+  for (const file of files) {
+    const score = calculateSimilarity(file.name.toLowerCase(), name.toLowerCase());
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = file;
+    }
+  }
+  
+  // Require minimum similarity
+  return bestScore > 0.3 ? bestMatch : null;
+}
+
+function calculateSimilarity(str1, str2) {
+  // Simplified implementation of Levenshtein distance
+  // For a production app, use a more robust library
+  let longerStr = str1.length > str2.length ? str1 : str2;
+  let shorterStr = str1.length > str2.length ? str2 : str1;
+  
+  // Find number of shared characters
+  let sharedChars = 0;
+  for (let i = 0; i < shorterStr.length; i++) {
+    if (longerStr.includes(shorterStr[i])) {
+      sharedChars++;
+    }
+  }
+  
+  return sharedChars / longerStr.length;
+}
+
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Base endpoint for status check
+app.get('/', (req, res) => {
+  res.json({ status: 'OrganAIzer API is running' });
+});
+
+// Start server
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+}); 

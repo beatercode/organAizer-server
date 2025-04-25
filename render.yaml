@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: organaizer-api
+    env: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
+    plan: free
+    autoDeploy: true 
