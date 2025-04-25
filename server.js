@@ -1,12 +1,13 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 10000;
 
 // OpenRouter Configuration
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-pro-exp-03-25:free@server';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-pro-exp-03-25:free';
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // Flag to check if OpenRouter API key is available
@@ -24,22 +25,32 @@ async function callOpenRouter(messages, temperature = 0.7) {
   }
   
   try {
+    console.log('Calling OpenRouter API with key:', OPENROUTER_API_KEY ? 'Available' : 'Not available');
     const response = await axios.post(
       OPENROUTER_API_URL,
       {
         model: OPENROUTER_MODEL,
         messages: messages,
         temperature: temperature,
+        max_tokens: 1000,
+        stream: false
       },
       {
         headers: {
           'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://organaizer-api.onrender.com',
-          'X-Title': 'OrganAIzer'
+          'HTTP-Referer': 'https://organaizer-server.onrender.com/',
+          'X-Title': 'OrganAIzer',
+          'User-Agent': 'OrganAIzer/1.0.0'
         }
       }
     );
+    
+    console.log('OpenRouter API Response:', JSON.stringify(response.data, null, 2));
+    
+    if (!response.data.choices || !response.data.choices[0]) {
+      throw new Error('Invalid response format from OpenRouter API');
+    }
     
     return response.data.choices[0].message.content;
   } catch (error) {
