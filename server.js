@@ -9,12 +9,20 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-pro-exp-03-25:free@server';
 const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
+// Flag to check if OpenRouter API key is available
+const isAIEnabled = !!OPENROUTER_API_KEY;
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increase limit for handling large directory structures
 
 // Function to call OpenRouter API
 async function callOpenRouter(messages, temperature = 0.7) {
+  if (!isAIEnabled) {
+    console.warn('OpenRouter API key not configured. Using fallback responses.');
+    return getFallbackResponse(messages);
+  }
+  
   try {
     const response = await axios.post(
       OPENROUTER_API_URL,
@@ -38,6 +46,47 @@ async function callOpenRouter(messages, temperature = 0.7) {
     console.error('Error calling OpenRouter API:', error.response?.data || error.message);
     throw new Error('Failed to process AI request');
   }
+}
+
+// Function to generate fallback responses
+function getFallbackResponse(messages) {
+  // Extract the user's query from messages
+  const userMessage = messages.find(m => m.role === 'user')?.content || '';
+  
+  // Check message content to determine context
+  if (userMessage.includes('suggest logical categories')) {
+    // Return basic categories for file organization
+    return JSON.stringify({
+      "Documenti": [".pdf", ".doc", ".docx", ".txt", ".rtf"],
+      "Immagini": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg"],
+      "Codice": [".js", ".ts", ".py", ".java", ".html", ".css", ".json"],
+      "Archivi": [".zip", ".rar", ".7z", ".tar", ".gz"],
+      "Dati": [".csv", ".xlsx", ".db", ".sql"],
+      "Altri": ["no_extension"]
+    });
+  } else if (userMessage.includes('suggest the best way to organize')) {
+    // Return generic organization suggestions
+    return `
+      Ecco alcuni suggerimenti generici per organizzare i tuoi file:
+      
+      1. Crea una struttura di cartelle basata su progetti o categorie
+      2. Usa un sistema di nomenclatura coerente per i file
+      3. Separa i file di origine dai file compilati o generati
+      4. Archivia regolarmente i file vecchi o non utilizzati
+      5. Utilizza cartelle come "Documenti", "Immagini", "Progetti", ecc. per una migliore navigazione
+      
+      Nota: questa è una risposta generata automaticamente perché la funzionalità AI non è configurata.
+    `;
+  } else if (userMessage.includes('Find the ones that best match')) {
+    // Return a message about search functionality
+    return `
+      La funzionalità di ricerca semantica richiede l'integrazione con un modello AI.
+      Per attivare questa funzione, configura una chiave API OpenRouter.
+    `;
+  }
+  
+  // Default fallback response
+  return "Risposta non disponibile. La funzionalità AI richiede una chiave API OpenRouter configurata.";
 }
 
 // Main endpoint
@@ -68,6 +117,12 @@ app.post('/organize', async (req, res) => {
         return res.status(400).json({ error: 'Invalid option' });
     }
     
+    // Add a note if AI is not enabled
+    if (!isAIEnabled) {
+      result.aiStatus = 'disabled';
+      result.aiNote = 'Funzionalità AI limitata. Configura una chiave API OpenRouter per risultati migliori.';
+    }
+    
     res.json(result);
   } catch (error) {
     console.error('Error processing request:', error);
@@ -93,14 +148,66 @@ async function categorizeFolderContent(folderData) {
     filesByExtension[ext].push(file);
   });
   
-  // Determine more meaningful categories using AI
-  const categories = await determineCategoriesWithAI(filesByExtension);
+  // Determine more meaningful categories using AI or fallback
+  let categories;
+  if (isAIEnabled) {
+    try {
+      categories = await determineCategoriesWithAI(filesByExtension);
+    } catch (error) {
+      console.warn('AI categorization failed, using fallback:', error);
+      categories = getFallbackCategories(filesByExtension);
+    }
+  } else {
+    categories = getFallbackCategories(filesByExtension);
+  }
   
   return {
     action: 'categorize',
     categories: categories,
     filesByCategory: mapFilesToCategories(files, categories)
   };
+}
+
+// Fallback function for categorization when AI is not available
+function getFallbackCategories(filesByExtension) {
+  const categories = {
+    "Documenti": [".pdf", ".doc", ".docx", ".txt", ".rtf", ".md", ".markdown"],
+    "Immagini": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".svg", ".ico"],
+    "Codice": [".js", ".ts", ".jsx", ".tsx", ".py", ".java", ".html", ".css", ".json", ".c", ".cpp", ".h", ".php", ".rb"],
+    "Dati": [".csv", ".xlsx", ".xls", ".db", ".sql", ".xml", ".yml", ".yaml"],
+    "Archivi": [".zip", ".rar", ".7z", ".tar", ".gz"],
+    "Altri": ["no_extension"]
+  };
+  
+  // Try to categorize file extensions not covered by default categories
+  const allExtensions = Object.keys(filesByExtension);
+  
+  // Try to auto-categorize common extensions
+  allExtensions.forEach(ext => {
+    // Skip already categorized extensions
+    const isAlreadyCategorized = Object.values(categories).some(catExts => catExts.includes(ext));
+    if (isAlreadyCategorized) return;
+    
+    // Simple rules for categorization
+    if (ext.match(/\.(mp4|avi|mov|wmv|mkv|flv)$/i)) {
+      if (!categories["Video"]) categories["Video"] = [];
+      categories["Video"].push(ext);
+    } else if (ext.match(/\.(mp3|wav|ogg|flac|aac)$/i)) {
+      if (!categories["Audio"]) categories["Audio"] = [];
+      categories["Audio"].push(ext);
+    } else if (ext.match(/\.(js|ts|py|java|c|cpp|rb|go|rs|php|html|css|jsx|tsx)$/i)) {
+      categories["Codice"].push(ext);
+    } else if (ext.match(/\.(jpg|jpeg|png|gif|bmp|tiff|webp|svg|ico)$/i)) {
+      categories["Immagini"].push(ext);
+    } else if (ext.match(/\.(doc|docx|pdf|txt|rtf|md|odt)$/i)) {
+      categories["Documenti"].push(ext);
+    } else {
+      // If can't categorize, add to "Altri"
+      categories["Altri"].push(ext);
+    }
+  });
+  
+  return categories;
 }
 
 // Function to suggest file renaming
@@ -182,6 +289,17 @@ async function suggestOrganization(folderData) {
 async function searchByDescription(folderData, query) {
   const files = extractAllFiles(folderData);
   
+  if (!isAIEnabled) {
+    // Provide a basic keyword-based search as fallback
+    return {
+      action: 'search',
+      query: query,
+      matches: performBasicKeywordSearch(files, query),
+      aiStatus: 'disabled',
+      note: 'Ricerca basata su parole chiave. La ricerca semantica richiede una chiave API OpenRouter.'
+    };
+  }
+  
   // Use OpenRouter to analyze semantic query and find matching files
   const fileDescriptions = files.map(file => ({
     path: file.path,
@@ -201,18 +319,75 @@ async function searchByDescription(folderData, query) {
   `;
   
   const messages = [
-    { role: "system", content: "You are an assistant expert in file analysis and search." },
-    { role: "user", content: prompt }
+      { role: "system", content: "You are an assistant expert in file analysis and search." },
+      { role: "user", content: prompt }
   ];
   
-  const aiResponse = await callOpenRouter(messages, 0.2);
-  const matchedFiles = parseAISearchResponse(aiResponse, files);
+  try {
+    const aiResponse = await callOpenRouter(messages, 0.2);
+    const matchedFiles = parseAISearchResponse(aiResponse, files);
+    
+    return {
+      action: 'search',
+      query: query,
+      matches: matchedFiles
+    };
+  } catch (error) {
+    console.error("Error in AI search:", error);
+    // Fallback to keyword search
+    return {
+      action: 'search',
+      query: query,
+      matches: performBasicKeywordSearch(files, query),
+      error: error.message,
+      note: 'Fallback a ricerca basata su parole chiave a causa di un errore con l\'AI.'
+    };
+  }
+}
+
+// Simple keyword-based search as fallback
+function performBasicKeywordSearch(files, query) {
+  const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length > 2);
   
-  return {
-    action: 'search',
-    query: query,
-    matches: matchedFiles
-  };
+  // No useful keywords to search
+  if (keywords.length === 0) {
+    return {
+      note: "Nessuna parola chiave significativa trovata nella query. Prova a essere più specifico."
+    };
+  }
+  
+  const results = files
+    .map(file => {
+      // Check for keyword matches in file name, path and extension
+      const searchString = `${file.name} ${file.path} ${file.extension || ''}`.toLowerCase();
+      
+      // Calculate a simple relevance score
+      let matches = 0;
+      let totalMatches = 0;
+      
+      keywords.forEach(keyword => {
+        const count = (searchString.match(new RegExp(keyword, 'g')) || []).length;
+        if (count > 0) matches++;
+        totalMatches += count;
+      });
+      
+      // If no matches, exclude this file
+      if (matches === 0) return null;
+      
+      // Calculate a simple score based on number of matching keywords and total matches
+      const score = Math.min(100, Math.round((matches / keywords.length) * 70 + (totalMatches / keywords.length) * 30));
+      
+      return {
+        file: file,
+        relevanceScore: score,
+        reason: `Contiene ${matches} delle parole chiave cercate`
+      };
+    })
+    .filter(Boolean) // Remove null entries
+    .sort((a, b) => b.relevanceScore - a.relevanceScore) // Sort by relevance
+    .slice(0, 10); // Limit results
+  
+  return results.length > 0 ? results : { note: "Nessun file trovato con queste parole chiave." };
 }
 
 // Helper functions
@@ -372,6 +547,45 @@ function summarizeFolderStructure(folderData, depth = 0, maxDepth = 2) {
 }
 
 function generateSuggestedStructure(folderData, aiSuggestions) {
+  // If AI is not enabled, provide a generic structure
+  if (!isAIEnabled || !aiSuggestions) {
+    const basicStructure = {
+      "Documenti/": {
+        description: "File di testo, documenti e PDF",
+        extensions: [".pdf", ".doc", ".txt", ".md"]
+      },
+      "Immagini/": {
+        description: "File di immagini",
+        extensions: [".jpg", ".png", ".gif", ".svg"]
+      },
+      "Codice/": {
+        description: "File di codice sorgente",
+        extensions: [".js", ".ts", ".py", ".html", ".css"]
+      },
+      "Risorse/": {
+        description: "Asset e risorse varie",
+        extensions: [".svg", ".json", ".xml"]
+      },
+      "Archivi/": {
+        description: "File compressi",
+        extensions: [".zip", ".rar", ".7z"]
+      }
+    };
+    
+    return {
+      currentRoot: folderData.name,
+      suggestedChanges: [
+        "1. Organizza i file in cartelle per tipo (Documenti, Immagini, Codice, ecc.)",
+        "2. Usa nomi consistenti per i file",
+        "3. Separa i file sorgente dai file generati",
+        "4. Archivia regolarmente i file non più utilizzati",
+        "5. Considera di usare tag o prefissi per raggruppare file correlati"
+      ],
+      suggestedFolders: basicStructure,
+      note: "Questa è una struttura generica. Attiva l'AI per suggerimenti personalizzati."
+    };
+  }
+  
   // Simple visual representation of suggested structure
   // In a real implementation, this could generate an interactive tree
   return {
